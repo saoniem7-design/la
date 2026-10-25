@@ -1,0 +1,101 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Platform      { FACEBOOK TIKTOK }
+enum AccountStatus { ACTIVE REVOKED ERROR }
+enum MatchType     { EXACT CONTAINS REGEX AI FALLBACK }
+enum RuleStatus    { ACTIVE PAUSED }
+enum LogStatus     { PENDING REPLIED SKIPPED FAILED }
+
+model User {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  socialAccounts SocialAccount[]
+  rules          AutomationRule[]
+
+  @@map("users")
+}
+
+model SocialAccount {
+  id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId                String        @map("user_id") @db.Uuid
+  platform              Platform
+  accountId             String        @map("account_id")          // FB Page ID / TikTok open_id
+  accountName           String?       @map("account_name")
+  accessTokenEncrypted  String        @map("access_token_encrypted")   // AES-256-GCM envelope
+  refreshTokenEncrypted String?       @map("refresh_token_encrypted")  // AES-256-GCM envelope
+  accessTokenExpiresAt  DateTime?     @map("access_token_expires_at") @db.Timestamptz(6) // null = non-expiring (FB page token)
+  refreshTokenExpiresAt DateTime?     @map("refresh_token_expires_at") @db.Timestamptz(6)
+  scopes                String[]      @default([])
+  status                AccountStatus @default(ACTIVE)
+  webhookSubscribed     Boolean       @default(false) @map("webhook_subscribed")
+  createdAt             DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user  User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rules AutomationRule[]
+  logs  Log[]
+
+  @@unique([platform, accountId])
+  @@index([userId])
+  @@index([accessTokenExpiresAt])
+  @@map("social_accounts")
+}
+
+model AutomationRule {
+  id              String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String     @map("user_id") @db.Uuid
+  socialAccountId String?    @map("social_account_id") @db.Uuid   // null = all of the user's accounts on this platform
+  platform        Platform
+  name            String
+  matchType       MatchType  @map("match_type")
+  triggerKeywords String[]   @default([]) @map("trigger_keywords") // keywords, or regex patterns when REGEX
+  caseSensitive   Boolean    @default(false) @map("case_sensitive")
+  replyTemplates  String[]   @default([]) @map("reply_template")   // variation pool; one picked at random
+  aiPrompt        String?    @map("ai_prompt")                     // used when matchType = AI
+  priority        Int        @default(100)                         // lower runs first
+  status          RuleStatus @default(ACTIVE)
+  createdAt       DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  socialAccount SocialAccount? @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+  logs          Log[]
+
+  @@index([userId, platform, status, priority])
+  @@map("automation_rules")
+}
+
+model Log {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  platform        Platform
+  commentId       String    @map("comment_id")
+  postId          String?   @map("post_id")
+  socialAccountId String?   @map("social_account_id") @db.Uuid
+  ruleId          String?   @map("rule_id") @db.Uuid
+  userCommentText String    @map("user_comment_text")
+  replyText       String?   @map("reply_text")
+  status          LogStatus @default(PENDING)
+  errorMessage    String?   @map("error_message")
+  attempts        Int       @default(0)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  repliedAt       DateTime? @map("replied_at") @db.Timestamptz(6)
+
+  socialAccount SocialAccount?  @relation(fields: [socialAccountId], references: [id], onDelete: SetNull)
+  rule          AutomationRule? @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+
+  @@unique([platform, commentId])   // idempotency / dedupe guarantee
+  @@index([socialAccountId, createdAt])
+  @@index([status, createdAt])
+  @@map("logs")
+}
